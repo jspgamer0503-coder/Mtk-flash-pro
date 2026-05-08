@@ -1,0 +1,11 @@
+# Direct Python dependencies for MTK Flash Pro
+# Install these inside the venv created by fix_mtk.sh
+#
+# Usage:
+#   pip install -r requirements.txt
+#
+# Note: mtkclient is NOT on PyPI and must be installed from GitHub:
+#   pip install git+https://github.com/bkerler/mtkclient.git
+
+customtkinter>=5.2.0
+pyusb>=1.2.1
