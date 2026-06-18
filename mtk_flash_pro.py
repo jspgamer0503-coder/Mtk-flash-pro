@@ -3,8 +3,15 @@
 
 import customtkinter as ctk
 import tkinter.filedialog as filedialog
+import tkinter.messagebox as messagebox
 import subprocess, threading, os, sys, time, logging, shutil
 from datetime import datetime
+from typing import Callable, Optional
+
+try:
+    import usb.core
+except ImportError:
+    usb.core = None
 
 APP_NAME = "MTK Flash Pro"
 VERSION  = "4.3"
@@ -19,7 +26,7 @@ logging.basicConfig(filename=LOG_PATH, level=logging.DEBUG,
                     format="%(asctime)s %(levelname)s %(message)s")
 
 # ── Ensure wrapper script exists ──────────────────────────────────────────────
-def _ensure_wrapper():
+def _ensure_wrapper() -> None:
     os.makedirs(APP_DIR, exist_ok=True)
     # mtkclient installs a "mtk" console script entry point in venv/bin/mtk
     mtk_bin = os.path.join(VENV, "bin", "mtk")
@@ -39,7 +46,7 @@ fi
 _ensure_wrapper()
 
 # ── Check mtkclient ───────────────────────────────────────────────────────────
-def mtk_ok():
+def mtk_ok() -> bool:
     """Check if mtkclient is installed and runnable in the venv."""
     try:
         # Try importing as mtkclient (the actual package name)
@@ -60,7 +67,7 @@ def mtk_ok():
 # pkexec is intentionally NOT used — it strips env and can't run shell scripts.
 # The fix_mtk.sh script adds a NOPASSWD sudoers rule so this is always silent.
 
-def _sudo_ok():
+def _sudo_ok() -> bool:
     """True if sudo currently needs no password."""
     try:
         return subprocess.run(["sudo","-n","true"],
@@ -68,7 +75,7 @@ def _sudo_ok():
     except Exception:
         return False
 
-def _build_cmd(args):
+def _build_cmd(args: list[str]) -> tuple[list[str], bool]:
     """
     Returns (cmd_list, needs_password:bool).
     Always uses: sudo bash WRAPPER args
@@ -76,7 +83,7 @@ def _build_cmd(args):
     cmd = ["sudo", "bash", WRAPPER] + args
     return cmd, not _sudo_ok()
 
-def _get_password_via_zenity():
+def _get_password_via_zenity() -> Optional[str]:
     try:
         r = subprocess.run(
             ["zenity","--password","--title=MTK Flash Pro — sudo password"],
@@ -86,11 +93,10 @@ def _get_password_via_zenity():
         return None
 
 # ── USB monitor ───────────────────────────────────────────────────────────────
-def detect_mtk():
+def detect_mtk() -> Optional[str]:
     try:
-        import usb.core
-        if usb.core.find(idVendor=0x0e8d, idProduct=0x0003): return "brom"
-        if usb.core.find(idVendor=0x0e8d, idProduct=0x2000): return "preloader"
+        if usb.core and usb.core.find(idVendor=0x0e8d, idProduct=0x0003): return "brom"
+        if usb.core and usb.core.find(idVendor=0x0e8d, idProduct=0x2000): return "preloader"
     except Exception:
         pass
     return None
@@ -104,16 +110,12 @@ C = {
 
 # ── Card action button ────────────────────────────────────────────────────────
 class ActionCard(ctk.CTkFrame):
-    def __init__(self, parent, icon, title, subtitle, command):
+    def __init__(self, parent, icon: str, title: str, subtitle: str,
+                 command: Callable):
         super().__init__(parent, corner_radius=12, fg_color=C["card"],
                          border_width=1, border_color=C["muted"])
         self._cmd    = command
         self._active = False
-
-        for w in (self,):
-            w.bind("<Button-1>", self._click)
-            w.bind("<Enter>",    lambda e: self._hover(True))
-            w.bind("<Leave>",    lambda e: self._hover(False))
 
         left = ctk.CTkFrame(self, fg_color="transparent", width=44)
         left.pack(side="left", padx=(14,6), pady=12)
@@ -142,14 +144,14 @@ class ActionCard(ctk.CTkFrame):
             w.bind("<Enter>",    lambda e: self._hover(True))
             w.bind("<Leave>",    lambda e: self._hover(False))
 
-    def _click(self, _=None):
+    def _click(self, _=None) -> None:
         if not self._active: self._cmd()
 
-    def _hover(self, on):
+    def _hover(self, on: bool) -> None:
         if not self._active:
             self.configure(border_color=C["accent"] if on else C["muted"])
 
-    def set_active(self, on):
+    def set_active(self, on: bool) -> None:
         self._active = on
         if on:
             self.configure(fg_color="#0a1a28", border_color=C["accent"],
@@ -174,18 +176,20 @@ class MTKFlashPro(ctk.CTk):
         self.geometry("1240x820")
         self.minsize(960,660)
 
-        self._proc       = None
-        self._busy       = False
-        self._mon_on     = True
-        self._active_btn = None
+        self._proc        = None
+        self._busy        = False
+        self._mon_on      = True
+        self._active_btn  = None
+        self._password    = None
+        self.password_event = threading.Event()
 
         self._build_ui()
         self._start_monitor()
         self._startup_check()
 
     # ── Startup ───────────────────────────────────────────────────────────────
-    def _startup_check(self):
-        def _go():
+    def _startup_check(self) -> None:
+        def _go() -> None:
             time.sleep(0.2)
             self._log(f"MTK Flash Pro v{VERSION}")
             self._log("Hold Vol- and plug USB to enter BROM mode.")
@@ -212,7 +216,7 @@ class MTKFlashPro(ctk.CTk):
 
         threading.Thread(target=_go, daemon=True).start()
 
-    def _post_startup(self):
+    def _post_startup(self) -> None:
         if _sudo_ok():
             self._log("✓ Elevation: passwordless sudo — no prompts")
         elif shutil.which("zenity"):
@@ -230,36 +234,28 @@ class MTKFlashPro(ctk.CTk):
         self.after(0, self.prog.stop)
         self.after(0, lambda: self.prog.set(0))
 
-    def _repair(self, after=None):
-        def _run():
-            for cmd in [
-                [VENV_PIP,"install","--upgrade","pip","--quiet"],
-                [VENV_PIP,"install","--upgrade",
-                 "git+https://github.com/bkerler/mtkclient.git"],
-            ]:
-                self._log(f"$ {' '.join(cmd)}")
-                try:
-                    p = subprocess.Popen(cmd, stdout=subprocess.PIPE,
-                                         stderr=subprocess.STDOUT, text=True)
-                    for l in iter(p.stdout.readline,""):
-                        if l.strip(): self._log(f"  {l.rstrip()}")
-                    p.wait()
-                except Exception as e:
-                    self._log(f"✗ {e}")
+    def _repair(self, after: Optional[Callable] = None) -> None:
+        def _log_subprocess(cmd: list[str]) -> None:
+            self._log(f"$ {' '.join(cmd)}")
+            try:
+                p = subprocess.Popen(cmd, stdout=subprocess.PIPE,
+                                     stderr=subprocess.STDOUT, text=True)
+                for l in iter(p.stdout.readline, ""):
+                    if l.strip(): self._log(f"  {l.rstrip()}")
+                p.wait()
+            except Exception as e:
+                self._log(f"✗ {e}")
+
+        def _run() -> None:
+            _log_subprocess([VENV_PIP, "install", "--upgrade", "pip", "--quiet"])
+            _log_subprocess([VENV_PIP, "install", "--upgrade", "mtkclient"])
 
             if not mtk_ok():
                 self._log("PyPI failed — trying git…")
-                cmd = [VENV_PIP,"install","--upgrade",
-                       "git+https://github.com/bkerler/mtkclient.git"]
-                self._log(f"$ {' '.join(cmd)}")
-                try:
-                    p = subprocess.Popen(cmd, stdout=subprocess.PIPE,
-                                         stderr=subprocess.STDOUT, text=True)
-                    for l in iter(p.stdout.readline,""):
-                        if l.strip(): self._log(f"  {l.rstrip()}")
-                    p.wait()
-                except Exception as e:
-                    self._log(f"✗ {e}")
+                _log_subprocess([
+                    VENV_PIP, "install", "--upgrade",
+                    "git+https://github.com/bkerler/mtkclient.git"
+                ])
 
             if mtk_ok():
                 self._log("✓ mtkclient installed!")
@@ -274,7 +270,7 @@ class MTKFlashPro(ctk.CTk):
         threading.Thread(target=_run, daemon=True).start()
 
     # ── UI ────────────────────────────────────────────────────────────────────
-    def _build_ui(self):
+    def _build_ui(self) -> None:
         self.grid_columnconfigure(1, weight=1)
         self.grid_rowconfigure(0, weight=1)
 
@@ -329,6 +325,15 @@ class MTKFlashPro(ctk.CTk):
             font=("Arial",12), text_color=C["subtext"],
             command=self._manual_repair)
         self.repair_btn.pack(fill="x", padx=14, pady=2)
+
+        ctk.CTkFrame(sb, height=1, fg_color=C["muted"]).pack(fill="x", padx=14, pady=8)
+
+        self.exit_btn = ctk.CTkButton(
+            sb, text="✕  Exit", height=34,
+            fg_color=C["card"], hover_color="#1c2333",
+            font=("Arial",12), text_color=C["subtext"],
+            command=self.on_close)
+        self.exit_btn.pack(fill="x", padx=14, pady=2)
 
         # Main area
         main = ctk.CTkFrame(self, corner_radius=0, fg_color=C["bg"])
@@ -399,18 +404,21 @@ class MTKFlashPro(ctk.CTk):
             command=self._kill, state="disabled")
         self.kill_btn.pack(side="right")
 
-    def _card(self, parent, icon, title, sub, cmd):
+    def _card(self, parent, icon: str, title: str, sub: str,
+              cmd: Callable) -> ActionCard:
         b = ActionCard(parent, icon, title, sub, cmd)
         b.pack(fill="x", padx=14, pady=4)
         return b
 
     # ── Status ────────────────────────────────────────────────────────────────
-    def _set_status(self, icon, title, sub, color=None):
+    def _set_status(self, icon: str, title: str, sub: str,
+                    color: Optional[str] = None) -> None:
         self.op_icon.configure(text=icon)
         self.op_title.configure(text=title, text_color=color or C["text"])
         self.op_sub.configure(text=sub)
 
-    def _set_busy(self, btn, icon, title, sub):
+    def _set_busy(self, btn: ActionCard, icon: str, title: str,
+                  sub: str) -> None:
         self._active_btn = btn
         btn.set_active(True)
         self._set_status(icon, title, sub, C["accent"])
@@ -418,7 +426,7 @@ class MTKFlashPro(ctk.CTk):
         self.prog.start()
         self.kill_btn.configure(state="normal")
 
-    def _set_idle(self, success=True, label=""):
+    def _set_idle(self, success: bool = True, label: str = "") -> None:
         if self._active_btn:
             self._active_btn.set_active(False)
             self._active_btn = None
@@ -433,7 +441,7 @@ class MTKFlashPro(ctk.CTk):
         self.prog.set(0)
         self.kill_btn.configure(state="disabled")
 
-    def _manual_repair(self):
+    def _manual_repair(self) -> None:
         self.repair_btn.configure(text="⟳  Repairing…", state="disabled")
         self._set_status("🔧","Repairing…","Installing mtkclient…", C["amber"])
         self.prog.start()
@@ -445,35 +453,47 @@ class MTKFlashPro(ctk.CTk):
         self._repair(after=_after)
 
     # ── Process runner ────────────────────────────────────────────────────────
-    def _run(self, args, btn, icon, label, sub):
+    def _run(self, args: list[str], btn: ActionCard, icon: str,
+             label: str, sub: str) -> None:
         if self._busy:
-            self._log("⚠ Already busy."); return
+            self._log("⚠ Already busy.")
+            return
         if not mtk_ok():
-            self._log("✗ mtkclient not installed — click ⟳ Repair Install"); return
+            self._log("✗ mtkclient not installed — click ⟳ Repair Install")
+            return
 
         cmd, needs_pw = _build_cmd(args)
-
-        # Get password before going busy (blocks main thread briefly but avoids
-        # zenity appearing after spinner starts)
-        password = None
-        if needs_pw:
-            if shutil.which("zenity"):
-                password = _get_password_via_zenity()
-                if password is None:
-                    self._log("✗ Password cancelled."); return
-                cmd = ["sudo","-S","bash",WRAPPER] + args
-            else:
-                self._log("✗ Needs root but no zenity. Run fix_mtk.sh to set up passwordless sudo.")
-                return
 
         self._busy = True
         self.after(0, lambda: self._set_busy(btn, icon, label, sub))
 
-        def _worker():
-            self._log("─"*44)
+        def _worker() -> None:
+            password: Optional[str] = None
+            if needs_pw:
+                if shutil.which("zenity"):
+                    self.password_event.clear()
+                    password = _get_password_via_zenity()
+                    self._password = password
+                    self.password_event.set()
+                    if password is None:
+                        self._log("✗ Password cancelled.")
+                        self._busy = False
+                        self.after(
+                            0, lambda: self._set_idle(False, "Cancelled"))
+                        return
+                    cmd = ["sudo", "-S", "bash", WRAPPER] + args
+                else:
+                    msg = ("✗ Needs root but no zenity. "
+                           "Run fix_mtk.sh to set up passwordless sudo.")
+                    self._log(msg)
+                    self._busy = False
+                    self.after(0, lambda: self._set_idle(False, "No zenity"))
+                    return
+
+            self._log("─" * 44)
             self._log(f"▶ {label}")
             display_cmd = cmd.copy()
-            if "-S" in display_cmd:   # hide -S from display
+            if "-S" in display_cmd:
                 display_cmd = [c for c in display_cmd if c != "-S"]
             self._log(f"$ {' '.join(display_cmd)}")
             rc = -1
@@ -484,7 +504,7 @@ class MTKFlashPro(ctk.CTk):
                     stdin=subprocess.PIPE if password else None,
                     text=False, bufsize=0)
                 if password:
-                    self._proc.stdin.write((password+"\n").encode())
+                    self._proc.stdin.write((password + "\n").encode())
                     self._proc.stdin.close()
                 for raw in iter(self._proc.stdout.readline, b""):
                     line = raw.decode(errors="replace").rstrip()
@@ -498,14 +518,14 @@ class MTKFlashPro(ctk.CTk):
             finally:
                 success = (rc == 0)
                 self._log(f"{'✓' if success else '✗'} exit {rc}")
-                self._log("─"*44)
+                self._log("─" * 44)
                 self._busy = False
                 self._proc = None
                 self.after(0, lambda: self._set_idle(success, label))
 
         threading.Thread(target=_worker, daemon=True).start()
 
-    def _kill(self):
+    def _kill(self) -> None:
         if self._proc:
             self._proc.terminate()
             self._log("⬛ Stopped.")
@@ -514,65 +534,76 @@ class MTKFlashPro(ctk.CTk):
             self.after(0, lambda: self._set_idle(False, "Stopped"))
 
     # ── Actions ──────────────────────────────────────────────────────────────
-    def _do_info(self):
+    def _do_info(self) -> None:
         self._run(["printgpt"], self.btn_info,
-                  "🔍","Scanning Device","Reading partition table…")
+                  "🔍", "Scanning Device", "Reading partition table…")
 
-    def _do_backup(self):
+    def _do_backup(self) -> None:
         out = filedialog.asksaveasfilename(
             title="Save backup as…", defaultextension=".bin",
-            filetypes=[("Binary","*.bin"),("All","*.*")])
+            filetypes=[("Binary", "*.bin"), ("All", "*.*")])
         if out:
-            self._run(["r","boot,recovery,vbmeta,lk",out],
-                      self.btn_backup,"💾","Backing Up",
+            self._run(["r", "boot,recovery,vbmeta,lk", out],
+                      self.btn_backup, "💾", "Backing Up",
                       f"Saving to {os.path.basename(out)}…")
 
-    def _do_flash(self):
+    def _do_flash(self) -> None:
         img = filedialog.askopenfilename(
             title="Select image file",
-            filetypes=[("Image","*.img"),("All","*.*")])
-        if img:
-            self._run(["w","system",img],
-                      self.btn_flash,"⚡","Flashing Image",
+            filetypes=[("Image", "*.img"), ("All", "*.*")])
+        if img and messagebox.askyesno(
+                "Confirm Flash",
+                f"Flash {os.path.basename(img)} to the system partition?\n\n"
+                "This will overwrite the current system image. Continue?"):
+            self._run(["w", "system", img],
+                      self.btn_flash, "⚡", "Flashing Image",
                       f"{os.path.basename(img)} → system partition")
 
-    def _do_exploit(self):
+    def _do_exploit(self) -> None:
         self._run(["payload"], self.btn_exploit,
-                  "🔓","BROM Exploit","Running bootrom payload…")
+                  "🔓", "BROM Exploit", "Running bootrom payload…")
 
-    def _do_wipe(self):
-        self._run(["e","userdata,metadata"], self.btn_wipe,
-                  "🗑️","Wiping Userdata","Erasing userdata and metadata…")
+    def _do_wipe(self) -> None:
+        if messagebox.askyesno(
+                "Confirm Wipe",
+                "Wipe userdata and metadata partitions?\n\n"
+                "All user data will be erased and cannot be restored. Continue?"):
+            self._run(["e", "userdata,metadata"], self.btn_wipe,
+                      "🗑️", "Wiping Userdata",
+                      "Erasing userdata and metadata…")
 
     # ── Log ──────────────────────────────────────────────────────────────────
-    def _log(self, text):
+    def _log(self, text: str) -> None:
         ts = datetime.now().strftime("%H:%M:%S")
         self.console.insert("end", f"[{ts}]  {text}\n")
         self.console.see("end")
         logging.info(text)
 
-    def _copy(self):
+    def _copy(self) -> None:
         self.clipboard_clear()
-        self.clipboard_append(self.console.get("1.0","end"))
+        self.clipboard_append(self.console.get("1.0", "end"))
 
-    def _clear(self):
-        self.console.delete("1.0","end")
+    def _clear(self) -> None:
+        self.console.delete("1.0", "end")
 
     # ── USB monitor ──────────────────────────────────────────────────────────
-    def _start_monitor(self):
-        def _loop():
+    def _start_monitor(self) -> None:
+        def _loop() -> None:
             while self._mon_on:
                 s = detect_mtk()
-                if s == "brom":        txt,col,ico = "BROM Mode",  C["green"], "📱"
-                elif s == "preloader": txt,col,ico = "Preloader",  "#3b82f6",  "📱"
-                else:                  txt,col,ico = "No Device",  C["muted"],  "📵"
+                if s == "brom":
+                    txt, col, ico = "BROM Mode", C["green"], "📱"
+                elif s == "preloader":
+                    txt, col, ico = "Preloader", "#3b82f6", "📱"
+                else:
+                    txt, col, ico = "No Device", C["muted"], "📵"
                 self.after(0, self.dev_badge.configure,
-                           {"text":txt,"text_color":col})
-                self.after(0, self.dev_icon.configure, {"text":ico})
+                           {"text": txt, "text_color": col})
+                self.after(0, self.dev_icon.configure, {"text": ico})
                 time.sleep(1.5)
         threading.Thread(target=_loop, daemon=True).start()
 
-    def on_close(self):
+    def on_close(self) -> None:
         self._mon_on = False
         self.destroy()
 
